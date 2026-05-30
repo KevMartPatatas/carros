@@ -1,22 +1,18 @@
 const Carro = require('../models/Carro');
-const path = require('path');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
-
-// Formato URL de la foto
-const fotoUrl = (foto) => foto ? `${BASE_URL}/uploads/${foto}` : null;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // GET /api/carros — Listar todos
 const listarCarros = async (req, res) => {
   try {
     const carros = await Carro.findAll();
-    const data = carros.map(c => ({
-      ...c.toJSON(),
-      foto: fotoUrl(c.foto),
-    }));
-    return res.json({ ok: true, data });
+    return res.json({ ok: true, data: carros });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ ok: false, error: 'Error al obtener los carros' });
@@ -28,12 +24,10 @@ const obtenerCarro = async (req, res) => {
   try {
     const { id } = req.params;
     const carro = await Carro.findByPk(id);
-
     if (!carro) {
       return res.status(404).json({ ok: false, error: 'Carro no encontrado' });
     }
-
-    return res.json({ ok: true, data: { ...carro.toJSON(), foto: fotoUrl(carro.foto) } });
+    return res.json({ ok: true, data: carro });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ ok: false, error: 'Error al obtener el carro' });
@@ -45,26 +39,28 @@ const crearCarro = async (req, res) => {
   try {
     const { placas, serie, color } = req.body;
 
-    // Validar campos obligatorios
     if (!placas || !serie) {
-      // Si se subió foto pero faltan campos, eliminarla
-      if (req.file) fs.unlinkSync(req.file.path);
+      if (req.file && req.file.public_id) {
+        await cloudinary.uploader.destroy(req.file.public_id);
+      }
       return res.status(400).json({ ok: false, error: 'Los campos placas y serie son obligatorios' });
     }
 
-    const foto = req.file ? req.file.filename : null;
+    // Cloudinary devuelve la URL directamente en req.file.path
+    const foto = req.file ? req.file.path : null;
 
     const carro = await Carro.create({ placas, serie, color, foto });
 
     return res.status(201).json({
       ok: true,
       mensaje: 'Carro creado correctamente',
-      data: { ...carro.toJSON(), foto: fotoUrl(carro.foto) },
+      data: carro,
     });
   } catch (error) {
-    if (req.file) fs.unlinkSync(req.file.path);
+    if (req.file && req.file.public_id) {
+      await cloudinary.uploader.destroy(req.file.public_id);
+    }
 
-    // Error de unicidad (placas o serie duplicadas)
     if (error.name === 'SequelizeUniqueConstraintError') {
       const campo = error.errors[0]?.path;
       return res.status(400).json({ ok: false, error: `El campo '${campo}' ya existe` });
@@ -87,30 +83,41 @@ const actualizarCarro = async (req, res) => {
 
     const carro = await Carro.findByPk(id);
     if (!carro) {
-      if (req.file) fs.unlinkSync(req.file.path);
+      if (req.file && req.file.public_id) {
+        await cloudinary.uploader.destroy(req.file.public_id);
+      }
       return res.status(404).json({ ok: false, error: 'Carro no encontrado' });
     }
 
-    // Si se sube nueva foto, eliminar la anterior
+    // Si se sube nueva foto, eliminar la anterior de Cloudinary
     if (req.file && carro.foto) {
-      const fotoAnterior = path.join('uploads', carro.foto);
-      if (fs.existsSync(fotoAnterior)) fs.unlinkSync(fotoAnterior);
+      try {
+        const urlPartes = carro.foto.split('/');
+        const publicIdConExtension = urlPartes[urlPartes.length - 1];
+        const folder = urlPartes[urlPartes.length - 2];
+        const publicId = `${folder}/${publicIdConExtension.split('.')[0]}`;
+        await cloudinary.uploader.destroy(publicId);
+      } catch (e) {
+        console.error('Error eliminando foto anterior:', e.message);
+      }
     }
 
     await carro.update({
       placas: placas || carro.placas,
       serie: serie || carro.serie,
       color: color !== undefined ? color : carro.color,
-      foto: req.file ? req.file.filename : carro.foto,
+      foto: req.file ? req.file.path : carro.foto,
     });
 
     return res.json({
       ok: true,
       mensaje: 'Carro actualizado correctamente',
-      data: { ...carro.toJSON(), foto: fotoUrl(carro.foto) },
+      data: carro,
     });
   } catch (error) {
-    if (req.file) fs.unlinkSync(req.file.path);
+    if (req.file && req.file.public_id) {
+      await cloudinary.uploader.destroy(req.file.public_id);
+    }
 
     if (error.name === 'SequelizeUniqueConstraintError') {
       const campo = error.errors[0]?.path;
@@ -136,10 +143,17 @@ const eliminarCarro = async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Carro no encontrado' });
     }
 
-    // Eliminar foto si existe
+    // Eliminar foto de Cloudinary si existe
     if (carro.foto) {
-      const fotoPath = path.join('uploads', carro.foto);
-      if (fs.existsSync(fotoPath)) fs.unlinkSync(fotoPath);
+      try {
+        const urlPartes = carro.foto.split('/');
+        const publicIdConExtension = urlPartes[urlPartes.length - 1];
+        const folder = urlPartes[urlPartes.length - 2];
+        const publicId = `${folder}/${publicIdConExtension.split('.')[0]}`;
+        await cloudinary.uploader.destroy(publicId);
+      } catch (e) {
+        console.error('Error eliminando foto de Cloudinary:', e.message);
+      }
     }
 
     await carro.destroy();
